@@ -90,7 +90,7 @@
 
     <!-- Step 2: Preview -->
     <sc-if value="{{ hasGroups }}" hint-placeholder-val="{{ false }}">
-      <div style="background: #fff; border: 1px solid #EAE5FA; border-radius: 14px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(32,20,80,0.05);">
+      <div id="langkah2-semak" style="background: #fff; border: 1px solid #EAE5FA; border-radius: 14px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(32,20,80,0.05);">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; flex-wrap: wrap; gap: 10px;">
           <div style="font-size: 12.5px; color: #5F5578; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;">Langkah 2 — Semak &amp; sahkan · {{ activeMonthLabel }} ({{ totalDetected }} murid dikesan)</div>
           <div style="font-size: 12.5px; color: #9088AE;">Baris bertona kuning perlu disemak (jantina/kaum tidak dikesan)</div>
@@ -310,7 +310,7 @@ class Component extends DCLogic {
 
   onSetLink = (monthCode, monthLabel) => {
     const current = this.state.sheetLinks[monthCode] || '';
-    const url = window.prompt('Tampal pautan Google Sheet untuk ' + monthLabel + ' (guna pautan "Publish to web" > CSV untuk tarik data automatik):', current);
+    const url = window.prompt('Tampal pautan Google Sheet untuk ' + monthLabel + ' (pautan "Publish to web" > CSV). Boleh tampal BEBERAPA pautan sekali gus (satu gid setiap sheet tingkatan), dipisahkan dengan ruang/koma:', current);
     if (url === null) return;
     const sheetLinks = { ...this.state.sheetLinks };
     if (url.trim()) sheetLinks[monthCode] = url.trim();
@@ -319,7 +319,8 @@ class Component extends DCLogic {
   };
 
   isCsvLink(url) {
-    return /output=csv/i.test(url || '') || /\/pub\?/i.test(url || '') && /csv/i.test(url || '');
+    const links = this.splitLinks(url);
+    return links.length > 0 && links.every((u) => /output=csv/i.test(u) || /\/pub\?/i.test(u) && /csv/i.test(u));
   }
 
   parseCsv(text) {
@@ -396,12 +397,22 @@ class Component extends DCLogic {
         const kelasCell = (row[mapping.tingkatanCol] || '').toString().trim();
         if (!kelasCell || kelasCell.toUpperCase() === 'JUMLAH') continue;
         if (/^\d+(\.\d+)?$/.test(kelasCell)) continue; // sanity: real kelas names always contain letters
+        if (/#REF|#N\/A|#VALUE/i.test(kelasCell)) continue; // formula errors
+        // Baris jadual RUMUSAN (bukan kelas sebenar): label tingkatan penuh atau jumlah keseluruhan
+        const kU = kelasCell.toUpperCase();
+        if (['SATU', 'DUA', 'TIGA', 'EMPAT', 'LIMA', 'ENAM', 'PEND.KHAS', 'PEND KHAS', 'PENDIDIKAN KHAS', 'J. BESAR', 'J.BESAR', 'JUM BESAR', 'JUMLAH BESAR', 'KESELURUHAN'].includes(kU)) continue;
 
-        const guruCell = mapping.guruCol >= 0 ? (row[mapping.guruCol] || '').toString().trim() : '';
+        let guruCell = mapping.guruCol >= 0 ? (row[mapping.guruCol] || '').toString().trim() : '';
+        // Baris rumusan menandakan penyelia dalam lajur guru — bukan baris kelas sebenar
+        if (/penyelia/i.test(guruCell)) continue;
+        if (/#REF|#N\/A|#VALUE/i.test(guruCell)) guruCell = '';
+        // Dedupe: workbook/pautan mungkin mengandungi sheet berulang (SEMUA TING + TING 1-5 + INDUK).
+        // Kelas yang sudah diisi daripada sheet terdahulu dilangkau — kejadian pertama diguna.
+        if (groupsMap[kelasCell] && groupsMap[kelasCell].rows.length > 0 && groupsMap[kelasCell]._sheet !== rows) continue;
         const derived = this.deriveTingkatan(kelasCell);
         const key = kelasCell;
         if (!groupsMap[key]) {
-          groupsMap[key] = { kelas: key, tingkatan: derived.tingkatan, ppki: derived.ppki, rows: [] };
+          groupsMap[key] = { kelas: key, tingkatan: derived.tingkatan, ppki: derived.ppki, rows: [], _sheet: rows };
         }
         let n = 1;
         raceCols.forEach((rc) => {
@@ -414,19 +425,32 @@ class Component extends DCLogic {
         });
       }
     }
-    return Object.values(groupsMap).filter((g) => g.rows.length > 0);
+    return Object.values(groupsMap).filter((g) => g.rows.length > 0).map(({ _sheet, ...g }) => g);
+  }
+
+  splitLinks(raw) {
+    return (raw || '').split(/[\s,]+/).map((u) => u.trim()).filter((u) => /^https?:\/\//i.test(u));
   }
 
   onFetchFromSheet = async (monthCode) => {
-    const url = this.state.sheetLinks[monthCode];
-    if (!url) return;
-    this.setState({ parsing: true, parseError: '', fileName: 'Google Sheet (CSV)', saveSuccess: false, activeMonth: monthCode });
+    const urls = this.splitLinks(this.state.sheetLinks[monthCode]);
+    if (!urls.length) return;
+    this.setState({ parsing: true, parseError: '', fileName: 'Google Sheet (CSV)' + (urls.length > 1 ? ' × ' + urls.length : ''), saveSuccess: false, activeMonth: monthCode });
     try {
-      const resp = await fetch(url, { cache: 'no-store' });
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      const text = await resp.text();
-      const rows = this.parseCsv(text);
-      const sheets = { 'Google Sheet': rows };
+      const sheets = {};
+      const failed = [];
+      for (let i = 0; i < urls.length; i++) {
+        try {
+          const resp = await fetch(urls[i], { cache: 'no-store' });
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          const text = await resp.text();
+          if (/^\s*</.test(text)) throw new Error('respons HTML, bukan CSV (semak pautan Publish to web → pilih format CSV)');
+          sheets['Google Sheet ' + (i + 1)] = this.parseCsv(text);
+        } catch (e) {
+          failed.push('Pautan ' + (i + 1) + ': ' + e.message);
+        }
+      }
+      if (!Object.keys(sheets).length) throw new Error(failed.join(' | '));
       let groups = this.extractCandidates(sheets);
       let isAggregate = false;
       if (!groups.length) {
@@ -440,7 +464,12 @@ class Component extends DCLogic {
       groups.forEach((g) => {
         g.rows = g.rows.map((r, i) => ({ ...r, _id: g.kelas + '-' + i + '-' + Date.now() }));
       });
-      this.setState({ parsing: false, groups, parseError: '', isAggregateImport: isAggregate });
+      const partialWarn = failed.length ? 'Sebahagian pautan gagal — ' + failed.join(' | ') : '';
+      this.setState({ parsing: false, groups, parseError: partialWarn, isAggregateImport: isAggregate });
+      setTimeout(() => {
+        const el = document.getElementById('langkah2-semak');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 150);
     } catch (err) {
       this.setState({ parsing: false, parseError: 'Ralat menarik data dari Sheet: ' + err.message + '. Pastikan Sheet sudah "Publish to web" (File → Share → Publish to web) sebagai CSV.', groups: [] });
     }
@@ -879,7 +908,10 @@ class Component extends DCLogic {
       const kelasCount = Object.keys(overrides).length;
       const studentCount = Object.values(overrides).reduce((a, ov) => a + (ov.students || []).length, 0);
       const latestSavedAt = Object.values(overrides).reduce((max, ov) => (ov.savedAt && ov.savedAt > max ? ov.savedAt : max), '');
-      const sheetLink = this.state.sheetLinks[m.code] || '';
+      const sheetLinkRaw = this.state.sheetLinks[m.code] || '';
+      const links = this.splitLinks(sheetLinkRaw);
+      const sheetLink = links[0] || '';
+      const linkCount = links.length;
       const isActive = this.state.activeMonth === m.code && this.state.groups.length > 0;
       return {
         code: m.code,
@@ -890,9 +922,9 @@ class Component extends DCLogic {
           : 'Tiada data lagi',
         hasSheetLink: !!sheetLink,
         sheetLink,
-        isCsvLink: this.isCsvLink(sheetLink),
+        isCsvLink: this.isCsvLink(sheetLinkRaw),
         onFetchFromSheet: () => this.onFetchFromSheet(m.code),
-        linkBtnLabel: sheetLink ? 'Tukar pautan Google Sheet' : '+ Tambah pautan Google Sheet',
+        linkBtnLabel: sheetLink ? (linkCount > 1 ? 'Tukar pautan Google Sheet (' + linkCount + ' pautan)' : 'Tukar pautan Google Sheet') : '+ Tambah pautan Google Sheet',
         onSetLink: () => this.onSetLink(m.code, m.label),
         onFileSelected: (e) => this.onFileSelected(m.code, e),
         cardBorder: isActive ? '#6D5AE0' : '#EAE5FA',
