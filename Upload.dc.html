@@ -93,11 +93,13 @@
       <div id="langkah2-semak" style="background: #fff; border: 1px solid #EAE5FA; border-radius: 14px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(32,20,80,0.05);">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; flex-wrap: wrap; gap: 10px;">
           <div style="font-size: 12.5px; color: #5F5578; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;">Langkah 2 — Semak &amp; sahkan · {{ activeMonthLabel }} ({{ totalDetected }} murid dikesan)</div>
-          <div style="font-size: 12.5px; color: #9088AE;">Baris bertona kuning perlu disemak (jantina/kaum tidak dikesan)</div>
+          <sc-if value="{{ manualImport }}" hint-placeholder-val="{{ false }}">
+            <div style="font-size: 12.5px; color: #9088AE;">Baris bertona kuning perlu disemak (jantina/kaum tidak dikesan)</div>
+          </sc-if>
         </div>
 
         <sc-if value="{{ isAggregateImport }}" hint-placeholder-val="{{ false }}">
-          <div style="background: #FEF6E7; border: 1px solid #F3DEB0; color: #8A5A00; font-size: 12.5px; padding: 8px 12px; border-radius: 8px; margin-bottom: 4px;">Data ini ditarik daripada jadual ringkasan (kiraan ikut kaum/jantina), bukan senarai nama sebenar — nama murid di bawah adalah placeholder, tetapi jumlah kaum/jantina/tingkatan tepat ikut sumber.</div>
+          <div style="background: #FEF6E7; border: 1px solid #F3DEB0; color: #8A5A00; font-size: 12.5px; padding: 8px 12px; border-radius: 8px; margin-bottom: 4px;">Data ini ditarik daripada jadual ringkasan enrolmen (kiraan ikut kaum/jantina setiap kelas) — semak jumlah di bawah, betulkan Tingkatan jika perlu, kemudian klik Sahkan &amp; Simpan.</div>
         </sc-if>
 
         <sc-for list="{{ groups }}" as="group" hint-placeholder-count="2">
@@ -115,10 +117,17 @@
                 <option value="PPKI">PPKI</option>
               </select>
               <div style="font-size: 12.5px; color: #9088AE;">{{ group.count }} murid</div>
-              <button onClick="{{ group.onAddRow }}" style="margin-left: auto; background: none; border: 1px solid #DCD4F7; border-radius: 8px; color: #6D5AE0; font-size: 12px; font-weight: 700; cursor: pointer; padding: 6px 10px;">+ Tambah baris</button>
+              <sc-if value="{{ group.showRows }}" hint-placeholder-val="{{ false }}">
+                <button onClick="{{ group.onAddRow }}" style="margin-left: auto; background: none; border: 1px solid #DCD4F7; border-radius: 8px; color: #6D5AE0; font-size: 12px; font-weight: 700; cursor: pointer; padding: 6px 10px;">+ Tambah baris</button>
+              </sc-if>
               <button onClick="{{ group.onRemoveGroup }}" style="background: none; border: 1px solid #F5C2D6; border-radius: 8px; color: #C0362E; font-size: 12px; font-weight: 700; cursor: pointer; padding: 6px 10px;">Buang kelas ini</button>
             </div>
 
+            <sc-if value="{{ group.isAgg }}" hint-placeholder-val="{{ false }}">
+              <div style="background: #F8F6FE; border: 1px solid #EAE5FA; border-radius: 8px; padding: 8px 12px; font-size: 13px; color: #5F5578; font-variant-numeric: tabular-nums; white-space: pre;">{{ group.aggSummary }}</div>
+            </sc-if>
+
+            <sc-if value="{{ group.showRows }}" hint-placeholder-val="{{ false }}">
             <div style="overflow-x: auto;">
               <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
                 <thead>
@@ -157,6 +166,7 @@
                 </tbody>
               </table>
             </div>
+            </sc-if>
           </div>
         </sc-for>
 
@@ -951,11 +961,19 @@ class Component extends DCLogic {
       };
     });
 
+    const isAgg = this.state.isAggregateImport;
     const groups = this.state.groups.map((g) => ({
       kelas: g.kelas,
       tingkatan: g.tingkatan,
       tingkatanBg: g.tingkatan ? '#fff' : '#FFFBEB',
       count: g.rows.length,
+      showRows: !isAgg,
+      isAgg: isAgg,
+      aggSummary: isAgg ? (() => {
+        const c = { L: 0, P: 0, Melayu: 0, Cina: 0, India: 0, 'Lain-lain': 0 };
+        g.rows.forEach((r) => { if (c[r.jantina] !== undefined) c[r.jantina]++; if (c[r.kaum] !== undefined) c[r.kaum]++; });
+        return 'L ' + c.L + ' · P ' + c.P + '   |   Melayu ' + c.Melayu + ' · Cina ' + c.Cina + ' · India ' + c.India + ' · Lain-lain ' + c['Lain-lain'];
+      })() : '',
       onKelasChange: (e) => this.updateGroup(g.kelas, (grp) => ({ ...grp, kelas: e.target.value })),
       onTingkatanChange: (e) => this.updateGroup(g.kelas, (grp) => ({ ...grp, tingkatan: e.target.value, ppki: e.target.value === 'PPKI' })),
       onAddRow: () => this.updateGroup(g.kelas, (grp) => ({ ...grp, rows: [...grp.rows, { nama: '', jantina: '', kaum: '', mbwn: false, _id: g.kelas + '-new-' + Date.now() }] })),
@@ -1000,6 +1018,7 @@ class Component extends DCLogic {
       groups,
       totalDetected,
       isAggregateImport: !!this.state.isAggregateImport,
+      manualImport: !this.state.isAggregateImport,
       onSave: this.onSave,
       onDiscard: this.onDiscard,
       saveMissingTingkatan: !!this.state.saveMissingTingkatan,
